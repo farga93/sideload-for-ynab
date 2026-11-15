@@ -1,0 +1,18 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+# Personal Claude Code instructions.
+CLAUDE.local.md
+
+# Real bank exports: local folder, never committed.
+private/
+# Safety net for an export dropped elsewhere. Only the synthetic fixtures
+# in test/fixtures/ are committed.
+*.csv
+*.CSV
+*.xlsx
+*.XLSX
+*.xml
+*.XML
+!test/fixtures/**

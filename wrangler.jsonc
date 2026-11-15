@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sideload-for-ynab",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-11-01",
+  // The PWA (Vite build) is served as static assets; /api/*, /share and /source go through the Worker.
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/share", "/source"]
+  },
+  // No invocation logs: nothing about transactions may be retained.
+  "observability": { "enabled": false },
+  "vars": {
+    "YNAB_API_BASE": "https://api.ynab.com/v1/plans",
+    "YNAB_PLAN_ID": "",
+    "YNAB_ACCOUNT_YUH": "",
+    "YNAB_ACCOUNT_BCV": "",
+    // AGPL-3.0: the "Source code" link in the app redirects here. If you deploy a modified
+    // version, point it to the public repository of your version.
+    "SOURCE_URL": "https://github.com/farga93/sideload-for-ynab"
+  }
+  // Secrets to set: npx wrangler secret put YNAB_TOKEN; npx wrangler secret put APP_SECRET
+}
