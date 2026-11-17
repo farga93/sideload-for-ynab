@@ -1,6 +1,16 @@
 import { fetchEurChfRates, todayIso, type RateTable } from "../core/fx";
 import { formatAmount } from "../core/money";
-import { eurDateRange, parseExport, prepare, type Prepared } from "../core/pipeline";
+import type { BankProfile } from "../core/catalog";
+import { PROFILES } from "../core/catalogData";
+import {
+  BUDGET_CURRENCY,
+  detectProfiles,
+  eurDateRange,
+  parseExport,
+  prepare,
+  type Prepared,
+  type ProfileMatch,
+} from "../core/pipeline";
 import { MAX_BATCH, type AccountKey, type ImportRequest, type ImportResponse } from "../core/types";
 
 const SECRET_KEY = "app-secret";
@@ -14,6 +24,9 @@ const el = {
   secret: $<HTMLInputElement>("secret"),
   secretClear: $<HTMLButtonElement>("secret-clear"),
   file: $<HTMLInputElement>("file"),
+  formatBox: $<HTMLDivElement>("format-box"),
+  format: $<HTMLSelectElement>("format"),
+  formatHint: $<HTMLParagraphElement>("format-hint"),
   status: $<HTMLParagraphElement>("status"),
   review: $<HTMLElement>("review"),
   reviewTitle: $<HTMLHeadingElement>("review-title"),
@@ -23,10 +36,14 @@ const el = {
   skippedTitle: $<HTMLElement>("skipped-title"),
   skipped: $<HTMLUListElement>("skipped"),
   send: $<HTMLButtonElement>("send"),
+  amountHeader: $<HTMLTableCellElement>("amount-header"),
   cancel: $<HTMLButtonElement>("cancel"),
 };
 
-let current: { account: AccountKey; prepared: Prepared } | undefined;
+let current: { profile: string; account?: AccountKey; prepared: Prepared } | undefined;
+/** File being reviewed, kept so it can be read again with another format. */
+let loaded: { name: string; bytes: Uint8Array } | undefined;
+const SUPPORTED = PROFILES.filter((p) => !p.unsupported).sort((a, b) => a.name.localeCompare(b.name));
 /** Incremented for each file picked, so a slower earlier file cannot overwrite a newer one. */
 let fileGeneration = 0;
 
@@ -79,12 +96,77 @@ el.file.addEventListener("change", () => {
 
 async function handleFile(file: File): Promise<void> {
   const generation = ++fileGeneration;
+  resetReview();
+  el.formatBox.hidden = true;
+  setStatus(`Reading "${file.name}"…`);
+  let matches: ProfileMatch[];
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (generation !== fileGeneration) return;
+    loaded = { name: file.name, bytes };
+    matches = detectProfiles(PROFILES, file.name, bytes);
+  } catch (e) {
+    if (generation === fileGeneration) setStatus(`Cannot read "${file.name}": ${(e as Error).message}`, "error");
+    return;
+  }
+
+  const supported = matches.filter((m) => !m.profile.unsupported);
+  const candidates = supported.map((m) => m.profile);
+  // A format recognized from the content is reliable; a name match only when it is the only one.
+  const byContent = supported.find((m) => m.by === "content")?.profile;
+  const chosen = byContent ?? (candidates.length === 1 ? candidates[0] : undefined);
+  const unsupported = matches.find((m) => m.profile.unsupported)?.profile;
+  showFormats(candidates, chosen, unsupported);
+  if (chosen) {
+    await readWith(chosen, generation);
+  } else {
+    setStatus(
+      candidates.length
+        ? "Several bank formats match this file name: choose yours below."
+        : "This file was not recognized: choose the bank format below.",
+    );
+  }
+}
+
+/** Fills the format list: likely formats first, then every supported one. */
+function showFormats(candidates: BankProfile[], chosen?: BankProfile, unsupported?: BankProfile): void {
+  const option = (p: BankProfile) => new Option(p.name, p.name, false, p === chosen);
+  const groups: HTMLElement[] = [new Option(chosen ? "" : "Choose…", "", false, !chosen)];
+  if (candidates.length > 1) {
+    const likely = document.createElement("optgroup");
+    likely.label = "Matching this file name";
+    likely.append(...candidates.map(option));
+    groups.push(likely);
+  }
+  const all = document.createElement("optgroup");
+  all.label = "All formats";
+  all.append(...SUPPORTED.filter((p) => !(candidates.length > 1 && candidates.includes(p))).map(option));
+  groups.push(all);
+  el.format.replaceChildren(...groups);
+  el.formatHint.textContent = unsupported
+    ? `"${unsupported.name}" matches this file name but cannot be read here: ${unsupported.unsupported}.`
+    : "";
+  el.formatBox.hidden = false;
+}
+
+el.format.addEventListener("change", () => {
+  const profile = SUPPORTED.find((p) => p.name === el.format.value);
+  if (!loaded) return;
+  if (profile) {
+    void readWith(profile, ++fileGeneration);
+  } else {
+    ++fileGeneration;
+    resetReview();
+    setStatus("Choose the bank format of this file.");
+  }
+});
+
+async function readWith(profile: BankProfile, generation: number): Promise<void> {
   const stale = () => generation !== fileGeneration;
   resetReview();
-  setStatus(`Reading "${file.name}"…`);
+  if (!loaded) return;
   try {
-    const result = parseExport(new Uint8Array(await file.arrayBuffer()));
-    if (stale()) return;
+    const result = parseExport(loaded.bytes, profile);
     const range = eurDateRange(result.rows);
     let rates: RateTable = {};
     let ratesError: string | undefined;
@@ -99,9 +181,14 @@ async function handleFile(file: File): Promise<void> {
       }
     }
     if (stale()) return;
-    current = { account: result.account, prepared: prepare(result, rates, ratesError) };
+    current = { profile: result.profile, account: result.account, prepared: prepare(result, rates, ratesError) };
     renderReview();
-    setStatus("");
+    setStatus(
+      result.account
+        ? ""
+        : `The "${result.profile}" format is not linked to a YNAB account yet: you can review the file ` +
+            "(amounts in the file's currency), but sending needs configurable accounts, coming in a next version.",
+    );
   } catch (e) {
     if (!stale()) setStatus((e as Error).message, "error");
   }
@@ -137,12 +224,14 @@ async function handleSharedFile(): Promise<void> {
 
 function renderReview(): void {
   if (!current) return;
-  const { account, prepared } = current;
+  const { profile, account, prepared } = current;
   const { transactions, skipped } = prepared;
-  el.reviewTitle.textContent = `${ACCOUNT_LABEL[account]} · ${transactions.length} transaction${transactions.length > 1 ? "s" : ""}`;
+  el.reviewTitle.textContent = `${profile} · ${transactions.length} transaction${transactions.length > 1 ? "s" : ""}`;
   const out = transactions.filter((t) => t.amount < 0).reduce((s, t) => s + t.amount, 0);
   const inflow = transactions.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0);
-  el.reviewTotal.textContent = `Outflow ${formatAmount(-out)} · Inflow ${formatAmount(inflow)} CHF`;
+  const currency = prepared.unknownCurrency ? "" : ` ${BUDGET_CURRENCY}`;
+  el.reviewTotal.textContent = `Outflow ${formatAmount(-out)} · Inflow ${formatAmount(inflow)}${currency}`;
+  el.amountHeader.textContent = prepared.unknownCurrency ? "Amount" : BUDGET_CURRENCY;
 
   el.rows.replaceChildren(
     ...transactions.map((t) => {
@@ -171,8 +260,8 @@ function renderReview(): void {
     }),
   );
 
-  el.send.textContent = `Send to YNAB (${ACCOUNT_LABEL[account]})`;
-  el.send.disabled = transactions.length === 0;
+  el.send.textContent = account ? `Send to YNAB (${ACCOUNT_LABEL[account]})` : "Send to YNAB";
+  el.send.disabled = transactions.length === 0 || !account || prepared.unknownCurrency;
   el.review.hidden = false;
   el.review.scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -192,6 +281,8 @@ function resetReview(): void {
 
 el.cancel.addEventListener("click", () => {
   resetReview();
+  loaded = undefined;
+  el.formatBox.hidden = true;
   setStatus("");
 });
 
@@ -200,7 +291,7 @@ el.cancel.addEventListener("click", () => {
 el.send.addEventListener("click", () => void send());
 
 async function send(): Promise<void> {
-  if (!current) return;
+  if (!current?.account || current.prepared.unknownCurrency) return;
   const secret = loadSecret();
   if (!secret) {
     setStatus("Enter the app secret first.", "error");
@@ -212,6 +303,7 @@ async function send(): Promise<void> {
   const totals: ImportResponse = { created: 0, duplicates: 0 };
   el.send.disabled = true;
   el.file.disabled = true;
+  el.format.disabled = true;
   try {
     // Batches are sent one after the other. If one fails, sending everything again is
     // safe: the import_ids make YNAB skip the transactions already created.
@@ -237,6 +329,8 @@ async function send(): Promise<void> {
       totals.duplicates += data.duplicates ?? 0;
     }
     resetReview();
+    loaded = undefined;
+    el.formatBox.hidden = true;
     setStatus(
       `${totals.created} transaction(s) created, ${totals.duplicates} already present. ` +
         "Review and approve them in YNAB.",
@@ -247,6 +341,7 @@ async function send(): Promise<void> {
   } finally {
     el.send.disabled = false;
     el.file.disabled = false;
+    el.format.disabled = false;
   }
 }
 

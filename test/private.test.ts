@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { parseExport } from "../src/core/pipeline";
+import { PROFILES } from "../src/core/catalogData";
+import { detectProfiles, parseExport } from "../src/core/pipeline";
 
 /**
  * Regression check on real exports placed in private/ (git-ignored).
@@ -12,7 +13,10 @@ const files = existsSync(dir) ? readdirSync(dir).filter((f) => /\.(csv|xlsx)$/i.
 
 describe.skipIf(files.length === 0)("real exports (private/)", () => {
   it.each(files.map((f, i) => [`file ${i + 1}`, f] as const))("%s parses without unreadable rows", (_, file) => {
-    const result = parseExport(new Uint8Array(readFileSync(new URL(file, dir))));
+    const bytes = new Uint8Array(readFileSync(new URL(file, dir)));
+    const profile = detectProfiles(PROFILES, file, bytes)[0]?.profile;
+    expect(profile?.unsupported).toBeUndefined();
+    const result = parseExport(bytes, profile!);
     expect(result.rows.length).toBeGreaterThan(0);
     for (const row of result.rows) {
       expect(row.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);

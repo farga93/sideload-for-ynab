@@ -37,14 +37,19 @@
       <section id="pick" class="card">
         <h2>Choose an export</h2>
         <p class="hint">
-          Yuh: CSV export from the app (Account → Documents), without opening or re-saving it.
-          BCV: "Liste des opérations" in xlsx format. On Android, you can also share the file
-          straight to this app.
+          The export of your bank, as downloaded, without opening or re-saving it. Yuh and BCV are
+          recognized from the file; for other banks, choose the format from the bank2ynab catalog.
+          On Android, you can also share the file straight to this app.
         </p>
         <label class="file">
           <input id="file" type="file" accept=".csv,.CSV,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
           <span>Choose a file…</span>
         </label>
+        <div id="format-box" class="format" hidden>
+          <label for="format">Bank format</label>
+          <select id="format"></select>
+          <p id="format-hint" class="hint"></p>
+        </div>
       </section>
 
       <p id="status" role="status" aria-live="polite"></p>
@@ -57,7 +62,7 @@
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>Date</th><th>Payee</th><th class="num">CHF</th></tr>
+              <tr><th>Date</th><th>Payee</th><th id="amount-header" class="num">CHF</th></tr>
             </thead>
             <tbody id="rows"></tbody>
           </table>

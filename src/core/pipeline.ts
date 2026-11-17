@@ -1,16 +1,49 @@
+import type { BankProfile } from "./catalog";
+import { profilesForFilename } from "./catalog";
 import { convertEurToChf, type RateTable } from "./fx";
 import { assignImportIds } from "./importId";
-import { parseBcv } from "./parsers/bcv";
-import { isYuhExport, parseYuh } from "./parsers/yuh";
+import { isBcvExport, parseBcv } from "./parsers/bcv";
+import { decodeText, parseWithProfile } from "./profile";
 import type { ParsedRow, ParseResult, SkippedRow, Transaction } from "./types";
 
-/** Detects the bank from the file content (not its name) and parses it. */
-export function parseExport(bytes: Uint8Array): ParseResult {
-  // An xlsx file is a zip archive: "PK" signature.
-  if (bytes[0] === 0x50 && bytes[1] === 0x4b) return parseBcv(bytes);
-  const text = new TextDecoder("utf-8").decode(bytes);
-  if (isYuhExport(text)) return parseYuh(text);
-  throw new Error("Unrecognized format: expected a Yuh CSV export or a BCV xlsx export");
+/** Currency of the YNAB budget, and of rows whose format has no Currency column. */
+export const BUDGET_CURRENCY = "CHF";
+
+export interface ProfileMatch {
+  profile: BankProfile;
+  /** "content": recognized from the file itself, reliable; "filename": name pattern only. */
+  by: "content" | "filename";
+}
+
+/**
+ * Formats that can read a file, most likely first: formats recognized from the content
+ * (BCV xlsx sheet, `Sideload Detect Header`), then formats whose file name pattern
+ * matches, supported ones before unsupported ones.
+ */
+export function detectProfiles(profiles: BankProfile[], filename: string, bytes: Uint8Array): ProfileMatch[] {
+  const byContent: BankProfile[] = [];
+  if (bytes[0] === 0x50 && bytes[1] === 0x4b) {
+    // An xlsx file is a zip archive: "PK" signature.
+    if (isBcvExport(bytes)) byContent.push(...profiles.filter((p) => p.parser === "bcv"));
+  } else {
+    const firstLine = decodeText(bytes.subarray(0, 4096)).replace(/^\ufeff/, "").split(/\r?\n/, 1)[0] ?? "";
+    byContent.push(...profiles.filter((p) => p.detectHeader?.test(firstLine)));
+  }
+  return [
+    ...byContent.map((profile) => ({ profile, by: "content" as const })),
+    ...profilesForFilename(profiles, filename)
+      .filter((p) => !byContent.includes(p))
+      .map((profile) => ({ profile, by: "filename" as const })),
+  ];
+}
+
+/** Reads a bank export with the given format. */
+export function parseExport(bytes: Uint8Array, profile: BankProfile): ParseResult {
+  if (profile.unsupported) throw new Error(`The "${profile.name}" format is not supported: ${profile.unsupported}`);
+  if (profile.parser === "bcv") return { ...parseBcv(bytes), profile: profile.name, account: profile.account };
+  // Without a Currency column, rows are in the account's currency. Only formats linked to an
+  // account have a known one for now; the others keep "" (shown as the file's currency).
+  return parseWithProfile(bytes, profile, { currency: profile.account ? BUDGET_CURRENCY : "" });
 }
 
 /** Date range [min, max] of the EUR rows, so only the needed rates are fetched. */
@@ -23,6 +56,8 @@ export interface Prepared {
   transactions: Transaction[];
   /** Rows skipped by the parser or for lack of an exchange rate. */
   skipped: SkippedRow[];
+  /** Some amounts are in the file's currency, unknown to the app: shown as is, not sendable. */
+  unknownCurrency: boolean;
 }
 
 /** YNAB limits, also enforced by the Worker (UTF-16 length). */
@@ -43,10 +78,11 @@ export const MAX_MEMO = 500;
 export function prepare(result: ParseResult, rates: RateTable, ratesError?: string): Prepared {
   const skipped = [...result.skipped];
   const sorted = [...result.rows].sort((a, b) => a.date.localeCompare(b.date));
-  const rows = assignImportIds(sorted, (row) => (row.currency === "CHF" ? "YNAB" : row.currency));
+  const rows = assignImportIds(sorted, (row) => (row.currency === "CHF" || row.currency === "" ? "YNAB" : row.currency));
   const transactions: Transaction[] = [];
   for (const row of rows) {
-    const skip = (reason: string) => skipped.push({ line: 0, reason, raw: `${row.date} | ${row.payee}` });
+    const skip = (reason: string) =>
+      skipped.push({ line: row.line ?? 0, reason, raw: `${row.date} | ${row.payee}${row.memo ? ` | ${row.memo}` : ""}` });
     let amount = row.amount;
     let memo = row.memo;
     if (row.currency === "EUR") {
@@ -62,7 +98,7 @@ export function prepare(result: ParseResult, rates: RateTable, ratesError?: stri
         skip((e as Error).message);
         continue;
       }
-    } else if (row.currency !== "CHF") {
+    } else if (row.currency !== "CHF" && row.currency !== "") {
       skip(`Unsupported currency: ${row.currency}`);
       continue;
     }
@@ -74,7 +110,8 @@ export function prepare(result: ParseResult, rates: RateTable, ratesError?: stri
       import_id: row.import_id,
     });
   }
-  return { transactions, skipped };
+  skipped.sort((a, b) => a.line - b.line);
+  return { transactions, skipped, unknownCurrency: result.rows.some((r) => r.currency === "") };
 }
 
 /** Shortens text to at most `max` UTF-16 units, without splitting a character, ending with "…". */

@@ -10,6 +10,8 @@ export interface ParsedRow {
   currency: string;
   payee: string;
   memo?: string;
+  /** Line or sheet row in the source file, to locate a row skipped later (e.g. no FX rate). */
+  line?: number;
 }
 
 /** Row left out by a parser, shown on screen with the reason. */
@@ -20,7 +22,10 @@ export interface SkippedRow {
 }
 
 export interface ParseResult {
-  account: AccountKey;
+  /** Name of the bank format (catalog section) used to read the file. */
+  profile: string;
+  /** Target YNAB account, when the format is linked to one. */
+  account?: AccountKey;
   rows: ParsedRow[];
   skipped: SkippedRow[];
 }

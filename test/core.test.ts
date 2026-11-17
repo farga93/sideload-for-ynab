@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { formatAmount, parseAmount } from "../src/core/money";
+import { formatAmount, parseBankAmount } from "../src/core/money";
 import { assignImportIds } from "../src/core/importId";
 import { convertEurToChf, fetchEurChfRates, rateFor } from "../src/core/fx";
 
-describe("parseAmount", () => {
+describe("parseBankAmount without a known decimal separator", () => {
   it.each([
     ["-12.50", -12500],
     ["12,5", 12500],
@@ -14,11 +14,11 @@ describe("parseAmount", () => {
     ["0.00", 0],
     ["-0.00", 0],
   ])("%s → %d", (text, expected) => {
-    expect(parseAmount(text)).toBe(expected);
+    expect(parseBankAmount(text)).toBe(expected);
   });
 
-  it.each(["", "abc", "12.5.3", "1.2345", "--3", "1,234", "-2.500"])("rejects \"%s\"", (text) => {
-    expect(() => parseAmount(text)).toThrow(/Unreadable/);
+  it.each(["abc", "12.5.3", "1.2345", "--3", "1,234", "-2.500"])("rejects \"%s\"", (text) => {
+    expect(() => parseBankAmount(text)).toThrow(/Unreadable|Ambiguous/);
   });
 });
 

@@ -6,7 +6,8 @@
     "build": "vite build",
     "typecheck": "tsc -p tsconfig.json && tsc -p src/worker/tsconfig.json && tsc -p test/tsconfig.json",
     "worker:dev": "vite build && wrangler dev",
-    "deploy": "vite build && wrangler deploy"
+    "deploy": "vite build && wrangler deploy",
+    "catalog:update": "node scripts/update-catalog.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261114.1",

@@ -4,12 +4,14 @@ Import bank exports into [YNAB](https://www.ynab.com) from your phone or compute
 
 YNAB's own file import only works in the web app and on iPad, and converting files by hand (cleaning them up, running a CSV converter, converting foreign-currency spending) is tedious. Sideload replaces those steps: the file is read in the browser, foreign currencies are converted at the ECB rate of the day, and the transactions arrive in YNAB ready to approve.
 
-Supported today: **Yuh** (CSV) and **BCV** (Banque Cantonale Vaudoise, xlsx). Support for many more banks, based on the [bank2ynab](https://github.com/bank2ynab/bank2ynab) format catalog, is in progress.
+Bank formats come from the [bank2ynab](https://github.com/bank2ynab/bank2ynab) catalog (over 100 formats from more than 20 countries), plus a few local formats that its catalog cannot describe yet (**Yuh** with its currency column, **BCV**'s xlsx export). For now, only Yuh and BCV can be sent to YNAB: the other formats can be read and reviewed, and sending them needs configurable accounts, which are coming next.
 
 Sideload for YNAB is an independent project. It is not affiliated with, sponsored or endorsed by YNAB.
 
 ## Features
 
+- **Bank formats from bank2ynab**: reads the delimited-text exports described in bank2ynab's catalog (a pinned copy in `catalog/`), in the browser. The payee and memo keep the bank's text.
+- **Format detection**: Yuh and BCV are recognized from the file's content; other banks from the file name, or chosen from the list.
 - **Yuh**: reads the CSV export from the Yuh app (Account → Documents) as is.
 - **BCV**: reads the "Liste des opérations" xlsx export from BCV e-banking.
 - **EUR → CHF**: converts EUR transactions at the official ECB rate of the transaction day, or of the previous business day for weekends and holidays. The original amount stays in the memo, e.g. `12.50 EUR @ 0.9312`, so a single-currency CHF budget keeps a correct balance.
@@ -23,7 +25,7 @@ Sideload for YNAB is an independent project. It is not affiliated with, sponsore
 ```
 Phone or PC (browser)                           Cloudflare Worker            YNAB API
 ┌──────────────────────────────────┐           ┌──────────────────┐
-│ bank file → detect bank → parse  │  JSON     │ POST /api/import │  POST
+│ bank file → detect format → parse│  JSON     │ POST /api/import │  POST
 │ → EUR→CHF (ECB rates) → review   │ ────────► │ check secret     │ ──────► transactions
 │ → send                           │           │ validate batch   │
 └──────────────────────────────────┘           │ add YNAB token   │
@@ -74,6 +76,7 @@ To try it first without touching your real budget, point the IDs at a test plan 
 
 - **Yuh (Android):** export the CSV from the Yuh app and share it to *Sideload*. Don't open or re-save the CSV first: spreadsheet apps change its structure.
 - **BCV (PC):** download "Liste des opérations" as xlsx from e-banking, open the app in a desktop browser, and choose the file.
+- **Other banks:** choose the export file; if the format is not recognized from its name, pick it in the *Bank format* list.
 - Check the list, press *Send to YNAB*, then approve the transactions in YNAB.
 
 ## Development
@@ -100,7 +103,8 @@ YNAB_ACCOUNT_BCV="..."
 
 | Path | Contents |
 | --- | --- |
-| `src/core/` | Pure logic, runs in the browser: bank detection, parsers, minimal xlsx reader, amounts in milliunits, ECB rates, `import_id`. |
+| `catalog/` | `bank2ynab.conf` (pinned copy of bank2ynab's catalog, MIT, source in `source.json`) and `local.conf` (Sideload's own formats and extension keys). |
+| `src/core/` | Pure logic, runs in the browser: catalog reader, format detection, profile engine, BCV parser, minimal xlsx reader, amounts in milliunits, ECB rates, `import_id`. |
 | `src/worker/` | Cloudflare Worker: app-secret check, batch validation, call to the YNAB API. |
 | `src/web/` | The PWA: page, styles, manifest with share target, service worker. |
 | `test/` | Unit tests and synthetic fixtures. |
@@ -109,16 +113,23 @@ YNAB_ACCOUNT_BCV="..."
 
 Never commit real bank exports. Fixtures in `test/fixtures/` and `test/helpers/` are synthetic and only reproduce the file structure. You can drop your own exports in `private/` (git-ignored): `test/private.test.ts` then checks that they parse, without printing any amount or label.
 
+### Bank format catalog
+
+`npm run catalog:update` replaces `catalog/bank2ynab.conf` with the latest version from bank2ynab (or a given commit: `npm run catalog:update -- <sha>`) and records it in `catalog/source.json`. Review the diff and run the tests before committing. To add a bank, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Limitations
 
 - Only CHF and EUR rows are imported. Other currencies are listed as skipped.
-- Bank export formats can change without notice; the parsers rely on the current column headers.
+- bank2ynab formats that need one of its Python plugins (PDF, xls, custom parsing) cannot be read in the browser; they are not offered.
+- Bank export formats can change without notice; the formats rely on the current column layout.
 - BCV truncates transaction labels to about 22 characters.
 - The YNAB API base path is configurable (`YNAB_API_BASE`) because the API is moving from `/budgets` to `/plans`.
 
 ## License
 
 Copyright (C) 2026 farga
+
+The bank format catalog in `catalog/bank2ynab.conf` comes from bank2ynab and is distributed under the MIT License; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 This program is free software: you can redistribute it and/or modify it under the terms of the [GNU Affero General Public License](LICENSE) as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 

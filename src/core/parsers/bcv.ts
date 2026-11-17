@@ -48,13 +48,22 @@ export function parseBcv(data: Uint8Array): ParseResult {
         skip("Missing label");
         continue;
       }
-      rows.push({ date, amount: debit ? -amount : amount, currency: "CHF", payee, memo: method });
+      rows.push({ date, amount: debit ? -amount : amount, currency: "CHF", payee, memo: method, line: row });
     } catch (e) {
       skip((e as Error).message);
     }
   }
   skipped.sort((a, b) => a.line - b.line);
-  return { account: "bcv", rows, skipped };
+  return { profile: "CH BCV", account: "bcv", rows, skipped };
+}
+
+/** True when the xlsx file is a BCV "Liste des opérations" export. */
+export function isBcvExport(data: Uint8Array): boolean {
+  try {
+    return findHeader(readFirstSheet(data)) !== -1;
+  } catch {
+    return false;
+  }
 }
 
 function findHeader(rows: SheetRow[]): number {

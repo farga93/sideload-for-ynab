@@ -3,13 +3,15 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parseCsv } from "../src/core/csv";
 import { parseBcv, splitLabel } from "../src/core/parsers/bcv";
-import { parseYuh } from "../src/core/parsers/yuh";
-import { eurDateRange, MAX_MEMO, parseExport, prepare, truncate } from "../src/core/pipeline";
+import { PROFILES } from "../src/core/catalogData";
+import { detectProfiles, eurDateRange, MAX_MEMO, parseExport, prepare, truncate } from "../src/core/pipeline";
 import { readFirstSheet } from "../src/core/xlsx";
 import { buildBcvXlsx, buildXlsx } from "./helpers/bcvXlsx";
 
 const yuhBytes = new Uint8Array(readFileSync(new URL("./fixtures/yuh.csv", import.meta.url)));
 const yuhText = new TextDecoder().decode(yuhBytes);
+const yuhProfile = PROFILES.find((p) => p.name === "CH Yuh")!;
+const parseYuh = (text: string) => parseExport(new TextEncoder().encode(text), yuhProfile);
 
 const bcvBytes = buildBcvXlsx([
   { date: "13.11.2026", label: "Caisse de pension Exe", debit: "154.43" },
@@ -35,37 +37,43 @@ describe("parseCsv", () => {
   });
 });
 
-describe("parseYuh", () => {
-  const result = parseYuh(yuhText);
+describe("CH Yuh format", () => {
+  const result = parseExport(yuhBytes, yuhProfile);
 
-  it("reads CHF/EUR spending and credits with RECIPIENT as payee", () => {
-    expect(result.account).toBe("yuh");
+  it("reads every currency with RECIPIENT as payee and the activity name and locality as memo", () => {
+    expect(result).toMatchObject({ profile: "CH Yuh", account: "yuh" });
     expect(result.rows).toEqual([
-      { date: "2026-11-06", amount: -6700, currency: "CHF", payee: "BOULANGERIEDUCOIN", memo: "Twint" },
-      { date: "2026-11-06", amount: -1790, currency: "CHF", payee: "EPICERIEDUCOIN", memo: "Twint" },
-      { date: "2026-11-06", amount: -1790, currency: "CHF", payee: "EPICERIEDUCOIN", memo: "Twint" },
-      { date: "2026-11-07", amount: -12500, currency: "EUR", payee: "Librairie Exemple", memo: "Card · LYON, FR" },
-      { date: "2026-11-08", amount: -36800, currency: "CHF", payee: "Opérateur Mobile SA", memo: "Transfer" },
-      { date: "2026-11-09", amount: 18490, currency: "EUR", payee: "Remboursement Exemple", memo: "Card · NICE, FR" },
+      { date: "2026-11-06", amount: -6700, currency: "CHF", payee: "BOULANGERIEDUCOIN", memo: "Twint à BOULANGERIEDUCOIN", line: 2 },
+      { date: "2026-11-06", amount: -1790, currency: "CHF", payee: "EPICERIEDUCOIN", memo: "Twint à EPICERIEDUCOIN", line: 3 },
+      { date: "2026-11-06", amount: -1790, currency: "CHF", payee: "EPICERIEDUCOIN", memo: "Twint à EPICERIEDUCOIN", line: 4 },
+      { date: "2026-11-07", amount: -12500, currency: "EUR", payee: "Librairie Exemple", memo: "Librairie Exemple LYON, FR", line: 5 },
+      { date: "2026-11-08", amount: -36800, currency: "CHF", payee: "Opérateur Mobile SA", memo: "Transfert à Opérateur Mobile SA", line: 6 },
+      { date: "2026-11-09", amount: 18490, currency: "EUR", payee: "Remboursement Exemple", memo: "Remboursement Exemple NICE, FR", line: 7 },
+      { date: "2026-11-12", amount: -80000, currency: "USD", payee: "Hôtel Exemple", memo: "Hôtel Exemple NEW YORK, US", line: 10 },
     ]);
   });
 
-  it("skips exchanges, securities and other currencies with a reason", () => {
+  it("skips exchanges and securities with the reason from the format's skip rules", () => {
     expect(result.skipped.map(({ line, reason }) => ({ line, reason }))).toEqual([
       { line: 8, reason: "Currency exchange" },
       { line: 9, reason: "Securities trade" },
-      { line: 10, reason: "Unsupported currency: USD" },
     ]);
   });
 
   it("reports real file lines when a field spans several lines", () => {
     const header = yuhText.split("\n")[0]!;
-    const multiLine = `${header}\n06/11/2026;PAYMENT_TRANSACTION_OUT;"Twint\nà X";-1.00;CHF;;;;;"X";;0;;;;\n07/11/2026;X;"Y";-1.00;USD;;;;;"Y";;0;;;;\n`;
-    expect(parseYuh(multiLine).skipped.map((s) => s.line)).toEqual([4]);
+    const multiLine = `${header}\n06/11/2026;PAYMENT_TRANSACTION_OUT;"Twint\nà X";-1.00;CHF;;;;;"X";;0;;;;\n07/11/2026;X;"Y";;;;;;;"Y";;0;;;;\n`;
+    expect(parseYuh(multiLine).skipped).toMatchObject([{ line: 4, reason: "Row without amount" }]);
   });
 
-  it("rejects a file without the expected columns", () => {
-    expect(() => parseYuh("DATE;ACTIVITY TYPE\n01/01/2026;X")).toThrow(/missing columns/);
+  it("falls back to SENDER when RECIPIENT is empty", () => {
+    const header = yuhText.split("\n")[0]!;
+    const row = `${header}\n09/11/2026;PAYMENT_TRANSACTION_IN;"""Transfert de X""";;;100.00;CHF;;;;"""Payer Exemple""";0;;;;\n`;
+    expect(parseYuh(row).rows.map((r) => r.payee)).toEqual(["Payer Exemple"]);
+  });
+
+  it("rejects a file without the columns its skip rules need", () => {
+    expect(() => parseYuh("DATE;ACTIVITY TYPE\n01/01/2026;X")).toThrow(/not found in the file's header/);
   });
 });
 
@@ -89,7 +97,7 @@ describe("parseBcv", () => {
 
   it("reads debits (negative) and credits oldest first, moving the PMT prefix to the memo", () => {
     expect(result.account).toBe("bcv");
-    expect(result.rows).toEqual([
+    expect(result.rows.map(({ line: _line, ...row }) => row)).toEqual([
       { date: "2026-11-09", amount: 57550, currency: "CHF", payee: "Assurance Exemple", memo: undefined },
       { date: "2026-11-10", amount: 8000000, currency: "CHF", payee: "EMPLOYEUR EXEMPLE SA", memo: undefined },
       { date: "2026-11-10", amount: -5000, currency: "CHF", payee: "Service Cloud", memo: "E-commerce" },
@@ -127,18 +135,30 @@ describe("parseBcv", () => {
   });
 });
 
-describe("parseExport", () => {
-  it("detects the bank from the content", () => {
-    expect(parseExport(yuhBytes).account).toBe("yuh");
-    expect(parseExport(bcvBytes).account).toBe("bcv");
-    expect(() => parseExport(new TextEncoder().encode("a;b;c"))).toThrow(/Unrecognized format/);
+describe("detectProfiles", () => {
+  const names = (filename: string, bytes: Uint8Array) =>
+    detectProfiles(PROFILES, filename, bytes).map((m) => `${m.profile.name} (${m.by})`);
+
+  it("recognizes Yuh and BCV from the content, whatever the file name", () => {
+    expect(names("download (3).csv", yuhBytes)).toEqual(["CH Yuh (content)"]);
+    expect(names("download.xlsx", bcvBytes)).toEqual(["CH BCV (content)"]);
+  });
+
+  it("recognizes bank2ynab formats from the file name", () => {
+    expect(names("SC-Transactions_2026-02-16_06-56-22.csv", new TextEncoder().encode("x"))).toEqual([
+      "CH SwissCard (filename)",
+    ]);
+  });
+
+  it("finds nothing for an unknown file", () => {
+    expect(names("notes.csv", new TextEncoder().encode("a;b;c"))).toEqual([]);
   });
 });
 
 describe("prepare", () => {
   // 2026-11-07 is a Saturday: Friday the 6th's rate applies.
   const rates = { "2026-11-06": 0.9312, "2026-11-09": 0.93 };
-  const result = parseYuh(yuhText);
+  const result = parseExport(yuhBytes, yuhProfile);
 
   it("only requests rates for the EUR rows' period", () => {
     expect(eurDateRange(result.rows)).toEqual({ from: "2026-11-07", to: "2026-11-09" });
@@ -148,12 +168,12 @@ describe("prepare", () => {
   it("converts EUR to CHF and assigns stable import_ids", () => {
     const { transactions } = prepare(result, rates);
     expect(transactions.map((t) => [t.import_id, t.payee_name, t.memo])).toEqual([
-      ["YNAB:-6700:2026-11-06:1", "BOULANGERIEDUCOIN", "Twint"],
-      ["YNAB:-1790:2026-11-06:1", "EPICERIEDUCOIN", "Twint"],
-      ["YNAB:-1790:2026-11-06:2", "EPICERIEDUCOIN", "Twint"],
-      ["EUR:-12500:2026-11-07:1", "Librairie Exemple", "Card · LYON, FR · 12.50 EUR @ 0.9312"],
-      ["YNAB:-36800:2026-11-08:1", "Opérateur Mobile SA", "Transfer"],
-      ["EUR:18490:2026-11-09:1", "Remboursement Exemple", "Card · NICE, FR · 18.49 EUR @ 0.9300"],
+      ["YNAB:-6700:2026-11-06:1", "BOULANGERIEDUCOIN", "Twint à BOULANGERIEDUCOIN"],
+      ["YNAB:-1790:2026-11-06:1", "EPICERIEDUCOIN", "Twint à EPICERIEDUCOIN"],
+      ["YNAB:-1790:2026-11-06:2", "EPICERIEDUCOIN", "Twint à EPICERIEDUCOIN"],
+      ["EUR:-12500:2026-11-07:1", "Librairie Exemple", "Librairie Exemple LYON, FR · 12.50 EUR @ 0.9312"],
+      ["YNAB:-36800:2026-11-08:1", "Opérateur Mobile SA", "Transfert à Opérateur Mobile SA"],
+      ["EUR:18490:2026-11-09:1", "Remboursement Exemple", "Remboursement Exemple NICE, FR · 18.49 EUR @ 0.9300"],
     ]);
   });
 
@@ -168,6 +188,14 @@ describe("prepare", () => {
     expect(skipped.filter((s) => /No EUR→CHF rate/.test(s.reason))).toHaveLength(2);
   });
 
+  it("flags rows in an unknown currency (format not linked to an account) without converting them", () => {
+    const rows = [{ date: "2026-11-10", amount: -5000, currency: "", payee: "X" }];
+    const prepared = prepare({ profile: "test", rows, skipped: [] }, {});
+    expect(prepared.unknownCurrency).toBe(true);
+    expect(prepared.transactions.map((t) => t.amount)).toEqual([-5000]);
+    expect(prepare(parseExport(yuhBytes, yuhProfile), {}).unknownCurrency).toBe(false);
+  });
+
   it("still imports the CHF rows when the rates could not be fetched", () => {
     const { transactions, skipped } = prepare(result, {}, "ECB rates unavailable (HTTP 503)");
     expect(transactions).toHaveLength(4);
@@ -175,7 +203,7 @@ describe("prepare", () => {
   });
 
   it("keeps CHF import_ids unchanged whether or not a same-day EUR row could be converted", () => {
-    const parsed = (rows: ParseResult["rows"]): ParseResult => ({ account: "yuh", rows, skipped: [] });
+    const parsed = (rows: ParseResult["rows"]): ParseResult => ({ profile: "test", account: "yuh", rows, skipped: [] });
     const eur = { date: "2026-11-10", amount: -5380, currency: "EUR", payee: "EUR SHOP" };
     const chf = { date: "2026-11-10", amount: -5000, currency: "CHF", payee: "CHF SHOP" };
     const before = prepare(parsed([eur, chf]), {}); // rate not published yet: EUR row skipped
@@ -189,7 +217,7 @@ describe("prepare", () => {
 
   it("truncates long payees and memos to YNAB's limits, keeping the FX note", () => {
     const row = { date: "2026-11-09", amount: -1000, currency: "EUR", payee: "P".repeat(300), memo: "M".repeat(600) };
-    const [t] = prepare({ account: "yuh", rows: [row], skipped: [] }, { "2026-11-09": 0.93 }).transactions;
+    const [t] = prepare({ profile: "test", account: "yuh", rows: [row], skipped: [] }, { "2026-11-09": 0.93 }).transactions;
     expect(t!.payee_name).toHaveLength(200);
     expect(t!.memo!.length).toBeLessThanOrEqual(MAX_MEMO);
     expect(t!.memo).toMatch(/· 1\.00 EUR @ 0\.9300$/);

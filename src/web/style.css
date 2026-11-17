@@ -70,6 +70,10 @@ main {
 
 label { display: block; font-weight: 600; margin-bottom: 4px; }
 
+.format { margin-top: 16px; }
+.format .hint { margin: 8px 0 0; }
+
+select,
 input[type="password"] {
   width: 100%;
   padding: 10px 12px;
